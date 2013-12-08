@@ -1,6 +1,6 @@
 #include "private-libwebsockets.h"
 
-struct libwebsocket *__libwebsocket_client_connect_2(
+struct libwebsocket *libwebsocket_client_connect_2(
 	struct libwebsocket_context *context,
 	struct libwebsocket *wsi
 ) {
@@ -11,7 +11,7 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 	int plen = 0;
 	const char *ads;
 
-	lwsl_client("__libwebsocket_client_connect_2\n");
+       lwsl_client("libwebsocket_client_connect_2\n");
 
 	/*
 	 * proxy?
@@ -25,26 +25,17 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 			"\x0d\x0a",
 			lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS),
 			wsi->u.hdr.ah->c_port);
-
-		/* OK from now on we talk via the proxy, so connect to that */
-
-		/*
-		 * (will overwrite existing pointer,
-		 * leaving old string/frag there but unreferenced)
-		 */
-		if (lws_hdr_simple_create(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS,
-						   context->http_proxy_address))
-			goto oom4;
-		wsi->u.hdr.ah->c_port = context->http_proxy_port;
+		ads = context->http_proxy_address;
+		server_addr.sin_port = htons(context->http_proxy_port);
+	} else {
+		ads = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS);
+		server_addr.sin_port = htons(wsi->u.hdr.ah->c_port);
 	}
 
 	/*
 	 * prepare the actual connection (to the proxy, if any)
 	 */
-
-	ads = lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS);
-
-	lwsl_client("__libwebsocket_client_connect_2: address %s\n", ads);
+       lwsl_client("libwebsocket_client_connect_2: address %s\n", ads);
 
 	server_hostent = gethostbyname(ads);
 	if (server_hostent == NULL) {
@@ -77,12 +68,12 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 	}
 
 	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(wsi->u.hdr.ah->c_port);
 	server_addr.sin_addr = *((struct in_addr *)server_hostent->h_addr);
+
 	bzero(&server_addr.sin_zero, 8);
 
 	if (connect(wsi->sock, (struct sockaddr *)&server_addr,
-					     sizeof(struct sockaddr)) == -1)  {
+			  sizeof(struct sockaddr)) == -1 || errno == EISCONN)  {
 
 		if (errno == EALREADY || errno == EINPROGRESS) {
 			lwsl_client("nonblocking connect retry\n");
@@ -102,8 +93,11 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 			return wsi;
 		}
 
-		lwsl_debug("Connect failed errno=%d\n", errno);
-		goto failed;
+		if (errno != EISCONN) {
+		
+			lwsl_debug("Connect failed errno=%d\n", errno);
+			goto failed;
+		}
 	}
 
 	lwsl_client("connected\n");
@@ -111,6 +105,17 @@ struct libwebsocket *__libwebsocket_client_connect_2(
 	/* we are connected to server, or proxy */
 
 	if (context->http_proxy_port) {
+
+		/* OK from now on we talk via the proxy, so connect to that */
+
+		/*
+		 * (will overwrite existing pointer,
+		 * leaving old string/frag there but unreferenced)
+		 */
+		if (lws_hdr_simple_create(wsi, _WSI_TOKEN_CLIENT_PEER_ADDRESS,
+						   context->http_proxy_address))
+			goto failed;
+		wsi->u.hdr.ah->c_port = context->http_proxy_port;
 
 		n = send(wsi->sock, context->service_buffer, plen, MSG_NOSIGNAL);
 		if (n < 0) {
@@ -304,7 +309,7 @@ libwebsocket_client_connect(struct libwebsocket_context *context,
 #endif
 	lwsl_client("libwebsocket_client_connect: direct conn\n");
 
-	return __libwebsocket_client_connect_2(context, wsi);
+       return libwebsocket_client_connect_2(context, wsi);
 
 bail1:
 	free(wsi->u.hdr.ah);

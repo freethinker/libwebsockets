@@ -52,7 +52,7 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 		 * timeout protection set in client-handshake.c
 		 */
 
-		if (__libwebsocket_client_connect_2(context, wsi) == NULL) {
+               if (libwebsocket_client_connect_2(context, wsi) == NULL) {
 			/* closed */
 			lwsl_client("closed\n");
 			return -1;
@@ -78,6 +78,13 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 		n = recv(wsi->sock, context->service_buffer,
 					sizeof(context->service_buffer), 0);
 		if (n < 0) {
+			
+			if (errno == EAGAIN) {
+				lwsl_debug(
+						   "Proxy read returned EAGAIN... retrying\n");
+				return 0;
+			}
+			
 			libwebsocket_close_and_free_session(context, wsi,
 						     LWS_CLOSE_STATUS_NOSTATUS);
 			lwsl_err("ERROR reading from proxy socket\n");
@@ -183,7 +190,9 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 					     "SSL_connect WANT_... retrying\n");
 					libwebsocket_callback_on_writable(
 								  context, wsi);
-
+					
+					wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_SSL;
+					
 					return 0; /* no error */
 				}
 				n = -1;
@@ -194,14 +203,78 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 				 * retry if new data comes until we
 				 * run into the connection timeout or win
 				 */
-
-				lwsl_err("SSL connect error %lu: %s\n", 
-					ERR_get_error(),
-					ERR_error_string(ERR_get_error(),
-					      (char *)context->service_buffer));
-				return 0;
+				
+				n = ERR_get_error();
+				if (n != SSL_ERROR_NONE) {
+					lwsl_err("SSL connect error %lu: %s\n",
+						n,
+						ERR_error_string(n,
+							  (char *)context->service_buffer));
+					return 0;
+				}
 			}
+		} else
+			wsi->ssl = NULL;
 
+		/* fallthru */
+			
+	case LWS_CONNMODE_WS_CLIENT_WAITING_SSL:
+			
+		if (wsi->use_ssl) {
+				
+			if (wsi->mode == LWS_CONNMODE_WS_CLIENT_WAITING_SSL) {
+				lws_latency_pre(context, wsi);
+				n = SSL_connect(wsi->ssl);
+				lws_latency(context, wsi,
+							"SSL_connect LWS_CONNMODE_WS_CLIENT_WAITING_SSL",
+							n, n > 0);
+				
+				if (n < 0) {
+					n = SSL_get_error(wsi->ssl, n);
+					
+					if (n == SSL_ERROR_WANT_READ ||
+						n == SSL_ERROR_WANT_WRITE) {
+						/*
+						 * wants us to retry connect due to
+						 * state of the underlying ssl layer...
+						 * but since it may be stalled on
+						 * blocked write, no incoming data may
+						 * arrive to trigger the retry.
+						 * Force (possibly many times if the SSL
+						 * state persists in returning the
+						 * condition code, but other sockets
+						 * are getting serviced inbetweentimes)
+						 * us to get called back when writable.
+						 */
+						
+						lwsl_info(
+								  "SSL_connect WANT_... retrying\n");
+						libwebsocket_callback_on_writable(
+														  context, wsi);
+						
+						wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_SSL;
+						
+						return 0; /* no error */
+					}
+					n = -1;
+				}
+				
+				if (n <= 0) {
+					/*
+					 * retry if new data comes until we
+					 * run into the connection timeout or win
+					 */
+					n = ERR_get_error();
+					if (n != SSL_ERROR_NONE) {
+						lwsl_err("SSL connect error %lu: %s\n",
+								 n,
+								 ERR_error_string(n,
+												  (char *)context->service_buffer));
+						return 0;
+					}
+				}
+			}
+			
 			#ifndef USE_CYASSL
 			/*
 			 * See comment above about CyaSSL certificate
@@ -790,7 +863,7 @@ libwebsockets_generate_client_handshake(struct libwebsocket_context *context,
 	p += strlen(key_b64);
 	p += sprintf(p, "\x0d\x0a");
 	if (lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN))
-		p += sprintf(p, "Origin: %s\x0d\x0a",
+		p += sprintf(p, "Origin: http://%s\x0d\x0a",
 			     lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_ORIGIN));
 
 	if (lws_hdr_simple_ptr(wsi, _WSI_TOKEN_CLIENT_SENT_PROTOCOLS))
